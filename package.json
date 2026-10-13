@@ -1,0 +1,61 @@
+{
+  "name": "my-diary",
+  "version": "1.0.0",
+  "description": "我的日记 - 本地日记本",
+  "productName": "我的日记",
+  "author": "local",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "sync-vendor": "node tools/sync_vendor.js",
+    "start": "node tools/sync_vendor.js && electron .",
+    "dist": "node tools/sync_vendor.js && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "dexie": "3.2.2",
+    "echarts": "5.4.0",
+    "markdown-it": "14.1.0",
+    "vue": "3.2.36"
+  },
+  "devDependencies": {
+    "electron": "19.1.9",
+    "electron-builder": "24.13.3"
+  },
+  "build": {
+    "appId": "local.mydiary",
+    "productName": "我的日记",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "renderer/**/*",
+      "vendor/**/*",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "我的日记",
+      "artifactName": "我的日记-安装包-${version}.exe"
+    }
+  }
+}

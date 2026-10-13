@@ -1,0 +1,29 @@
+# ---------- 依赖与构建产物 ----------
+node_modules/
+dist/
+.eb-cache/
+.tmp/
+.tmp-probe/
+
+# 运行时的第三方库副本，由 `npm run sync-vendor` 从 node_modules 生成
+vendor/
+
+# ---------- 测试与截图产物 ----------
+_shots/
+_profile_test/
+_ui_profile/
+_*.log
+
+# ---------- 不发布的本地参考资料 ----------
+# 含第三方版权材料的本地对照资料，仅留在本机，不进仓库。
+_reference/
+_readable/
+_deps/
+_reverse/
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini

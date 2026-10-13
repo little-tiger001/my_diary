@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: file:; img-src 'self' data: file: https: http:; style-src 'self' 'unsafe-inline'">
+<!-- 说明：必须允许 unsafe-eval —— 本项目用的是 Vue 完整版（vue.global.prod.js），
+     它在运行时用 new Function 编译 index.html 里的模板。纯本地应用、不加载任何远程内容。 -->
+<title>我的日记</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" v-cloak>
+
+  <div v-if="dbError" class="fatal">
+    <h2>无法打开日记数据库</h2>
+    <p class="fatal-msg">{{ dbError }}</p>
+    <p>最常见的原因：<b>原版「一本日记」正在运行</b>。两个程序共用同一份 IndexedDB（LevelDB），同一时刻只能有一个持有它。</p>
+    <p>请完全退出「一本日记」（包括托盘图标）后，点下面的按钮重试。</p>
+    <button class="btn primary" @click="retryOpen">重试</button>
+  </div>
+
+  <template v-else>
+    <header class="topbar">
+      <div class="brand">我的日记</div>
+      <input class="search" v-model="search" placeholder="搜索标题与正文…">
+      <div class="spacer"></div>
+      <nav class="nav">
+        <button :class="['navbtn', view==='list' && 'on']" @click="view='list'">日记</button>
+        <button :class="['navbtn', view==='calendar' && 'on']" @click="view='calendar'">日历</button>
+        <button :class="['navbtn', view==='stats' && 'on']" @click="view='stats'">统计</button>
+        <button :class="['navbtn', view==='settings' && 'on']" @click="view='settings'">设置</button>
+      </nav>
+      <button class="btn primary" @click="newDiary">写日记</button>
+    </header>
+
+    <div v-if="notice" class="notice" :class="notice.kind">
+      <span>{{ notice.text }}</span>
+      <button class="x" @click="notice=null">×</button>
+    </div>
+
+    <div class="main">
+      <aside class="sidebar">
+        <div class="side-block">
+          <div class="side-title">
+            分类
+            <button class="mini" @click="addCategory">+</button>
+          </div>
+          <div :class="['side-item', !filterCategory && 'on']" @click="filterCategory=''">
+            全部 <span class="cnt">{{ diaries.length }}</span>
+          </div>
+          <div v-for="c in categories" :key="c.uuid"
+               :class="['side-item', filterCategory===c.name && 'on']"
+               @click="filterCategory = filterCategory===c.name ? '' : c.name">
+            <span class="ellipsis">{{ c.name }}</span>
+            <span class="cnt">{{ c.count || 0 }}</span>
+            <button class="mini danger" @click.stop="removeCategory(c)">×</button>
+          </div>
+        </div>
+
+        <div class="side-block">
+          <div class="side-title">
+            标签
+            <button class="mini" @click="addTag">+</button>
+          </div>
+          <div :class="['side-item', !filterTag && 'on']" @click="filterTag=''">全部</div>
+          <div v-for="t in tags" :key="t.uuid"
+               :class="['side-item', filterTag===t.name && 'on']"
+               @click="filterTag = filterTag===t.name ? '' : t.name">
+            <span class="ellipsis">{{ t.name }}</span>
+            <button class="mini danger" @click.stop="removeTag(t)">×</button>
+          </div>
+        </div>
+      </aside>
+
+      <section class="center" v-show="view==='list'">
+        <div class="list-head">
+          <span>{{ listTitle }}</span>
+          <span class="dim">{{ filteredDiaries.length }} 篇</span>
+        </div>
+        <div class="list">
+          <div v-if="!filteredDiaries.length" class="empty">还没有日记</div>
+          <div v-for="d in filteredDiaries" :key="d.uuid"
+               :class="['card', current && current.uuid===d.uuid && 'on']"
+               @click="openDiary(d)">
+            <div class="card-top">
+              <span class="card-title">{{ d.title || firstLine(d.content) || '无标题' }}</span>
+              <span class="card-time">{{ fmtDate(d.recordTime || d.createTime) }}</span>
+            </div>
+            <div class="card-body">{{ plain(d.content).slice(0, 90) }}</div>
+            <div class="card-tags">
+              <span v-if="d.category" class="chip cat">{{ d.category }}</span>
+              <span v-for="t in splitTags(d.tag)" :key="t" class="chip">{{ t }}</span>
+              <span v-if="d.localImages" class="chip img">图</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="center wide" v-show="view==='calendar'">
+        <div class="list-head">
+          <button class="mini" @click="shiftMonth(-1)">‹</button>
+          <span>{{ calYear }} 年 {{ calMonth }} 月</span>
+          <button class="mini" @click="shiftMonth(1)">›</button>
+          <span class="dim">当月 {{ monthDiaries.length }} 篇</span>
+        </div>
+        <div class="cal-week">
+          <span v-for="w in ['日','一','二','三','四','五','六']" :key="w">{{ w }}</span>
+        </div>
+        <div class="cal-grid">
+          <div v-for="(cell, i) in calendarCells" :key="i"
+               :class="['cal-cell', !cell.day && 'blank', cell.count && 'has', cell.isToday && 'today']"
+               @click="cell.day && (search='', selectDay(cell))">
+            <span class="cal-day">{{ cell.day || '' }}</span>
+            <span v-if="cell.count" class="cal-dot">{{ cell.count }}</span>
+          </div>
+        </div>
+        <div class="list" v-if="dayFilter">
+          <div class="list-head"><span>{{ dayFilter }} 的日记</span></div>
+          <div v-for="d in dayDiaries" :key="d.uuid" class="card" @click="openDiary(d)">
+            <div class="card-top">
+              <span class="card-title">{{ d.title || firstLine(d.content) || '无标题' }}</span>
+              <span class="card-time">{{ fmtTime(d.recordTime || d.createTime) }}</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="center wide" v-show="view==='stats'">
+        <div class="list-head"><span>写作统计</span></div>
+        <div class="stat-cards">
+          <div class="stat"><b>{{ diaries.length }}</b><span>总篇数</span></div>
+          <div class="stat"><b>{{ totalWords }}</b><span>总字数</span></div>
+          <div class="stat"><b>{{ writingDays }}</b><span>写作天数</span></div>
+          <div class="stat"><b>{{ streak }}</b><span>当前连续(天)</span></div>
+        </div>
+        <div ref="chartYear" class="chart"></div>
+        <div ref="chartMonth" class="chart"></div>
+        <div ref="chartCat" class="chart"></div>
+      </section>
+
+      <section class="center wide" v-show="view==='settings'">
+        <div class="list-head"><span>设置</span></div>
+        <div class="settings">
+          <h3>数据位置</h3>
+          <p class="dim mono">{{ dataPath }}</p>
+          <p class="warn">
+            本程序与原版「一本日记」<b>共用同一份数据</b>。同一时刻只能运行其中一个，
+            否则 IndexedDB 会加锁失败。新写入的记录一律标记为「已同步」，
+            避免原版把它上传到厂商服务器。
+          </p>
+
+          <h3>本地备份</h3>
+          <p class="dim">导出/导入与原版完全一致的加密备份文件（AES-256-ECB，写入 <span class="mono">data/</span> 目录）。</p>
+          <div class="row">
+            <button class="btn" @click="exportBackup">导出备份到 data/</button>
+            <button class="btn" @click="importBackup">从 data/ 导入</button>
+            <button class="btn" @click="exportJson">导出 JSON</button>
+            <button class="btn" @click="importJson">导入 JSON</button>
+          </div>
+
+          <h3>与原版《一本日记》同步（WebDAV）</h3>
+          <p class="dim">
+            使用原版「第三方同步」协议，远端写入 <span class="mono">/diary/diary.json</span> 与 <span class="mono">/diary/si</span>，
+            图片写到 <span class="mono">/diary/&lt;名&gt;_&lt;字节数&gt;.&lt;扩展名&gt;</span>。
+            手机端《一本日记》选择<strong>同一个云盘账号</strong>即可与本程序互通。
+          </p>
+          <div class="form">
+            <label>云盘类型
+              <select v-model.number="dav.syncType">
+                <option :value="2">坚果云</option>
+                <option :value="4">自定义 WebDAV</option>
+              </select>
+            </label>
+            <label v-if="dav.syncType === 4">WebDAV 地址
+              <input v-model="dav.customUrl" placeholder="https://dav.example.com/dav/">
+            </label>
+            <label>账号
+              <input v-model="dav.username" placeholder="坚果云填登录邮箱">
+            </label>
+            <label>密码
+              <input v-model="dav.password" type="password" placeholder="坚果云填「应用密码」">
+            </label>
+            <label class="chk"><input type="checkbox" v-model="dav.selfSigned"> 忽略自签名证书</label>
+          </div>
+          <p class="dim mono" v-if="davBase">远端目录：{{ davBase }}/diary/</p>
+          <p class="dim" v-if="davPendingImages">待上传本地图片：{{ davPendingImages }} 张</p>
+          <div class="row">
+            <button class="btn" @click="davTest">测试连接</button>
+            <button class="btn" @click="davSave">保存配置</button>
+            <button class="btn primary" @click="syncNow">同步（先拉后推）</button>
+            <button class="btn" @click="syncUploadOnly">仅上传</button>
+            <button class="btn" @click="syncDownloadOnly">仅下载合并</button>
+          </div>
+          <p class="dim" v-if="dav.lastSync">上次同步：{{ dav.lastSync }}</p>
+          <p class="warn" v-if="dav.lastError">上次错误：{{ dav.lastError }}</p>
+        </div>
+      </section>
+
+      <section class="editor" v-show="view==='list'">
+        <template v-if="editing">
+          <div class="editor-head">
+            <input class="title-input" v-model="editing.title" placeholder="标题">
+            <button class="btn" @click="togglePreview">{{ preview ? '编辑' : '预览' }}</button>
+            <button class="btn primary" @click="saveDiary">保存</button>
+            <button class="btn danger" @click="deleteDiary">删除</button>
+          </div>
+
+          <div class="editor-meta">
+            <input type="date" v-model="editDate">
+            <input class="w-sm" v-model="editing.weather" placeholder="天气">
+            <input class="w-sm" v-model="editing.address" placeholder="地点">
+            <select v-model="editing.category">
+              <option value="">无分类</option>
+              <option v-for="c in categories" :key="c.uuid" :value="c.name">{{ c.name }}</option>
+            </select>
+            <input v-model="editTags" placeholder="标签，用逗号分隔">
+          </div>
+
+          <div v-if="preview" class="preview markdown" v-html="rendered"></div>
+          <textarea v-else class="body-input" v-model="editing.content"
+                    placeholder="写点什么…（支持 Markdown）" @paste="onPaste"></textarea>
+
+          <div class="images">
+            <div v-for="img in editImages" :key="img" class="thumb">
+              <img :src="imgSrc(img)">
+              <button class="mini danger" @click="removeImage(img)">×</button>
+            </div>
+            <button class="addimg" @click="pickImage">+ 图片</button>
+          </div>
+        </template>
+        <div v-else class="empty">选一篇日记，或点右上角「写日记」</div>
+      </section>
+    </div>
+  </template>
+
+  <input ref="filePicker" type="file" accept="image/*" multiple style="display:none" @change="onFilePicked">
+
+  <div v-if="dialog" class="modal-mask" @click.self="dialogCancel">
+    <div class="modal">
+      <h3>{{ dialog.title }}</h3>
+      <p v-if="dialog.hint" class="dim">{{ dialog.hint }}</p>
+      <input v-if="dialog.kind === 'text'" v-model="dialog.value"
+             @keyup.enter="dialogOk" @keyup.esc="dialogCancel">
+      <div class="modal-btns">
+        <button class="btn" @click="dialogCancel">取消</button>
+        <button class="btn primary" @click="dialogOk">{{ dialog.okText }}</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="../vendor/vue.global.prod.js"></script>
+<script src="../vendor/dexie.min.js"></script>
+<script src="../vendor/markdown-it.min.js"></script>
+<script src="../vendor/echarts.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
