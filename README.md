@@ -187,7 +187,56 @@ my_diary/
   vendor/               运行时的第三方库副本，由 npm run sync-vendor 生成（不进仓库）
   tools/                构建与测试脚本，见下
   build/                生成的图标
-  dist/                 打包产物
+  release/              打包产物（不进仓库）
+```
+
+---
+
+## 从零开始（clone 之后）
+
+```bash
+git clone git@github.com:little-tiger001/my_diary.git
+cd my_diary
+npm install
+npm start
+```
+
+要出安装包和装到本机：
+
+```bash
+npm run dist
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\install.ps1
+```
+
+### 两个可能踩到的点
+
+**1. Electron 二进制没下载下来。** `npm install` 会触发 `electron` 的 postinstall 去下载
+约 90 MB 的运行时。如果这一步被跳过（比如 npm 配置了忽略安装脚本），
+`node_modules/electron/dist/electron.exe` 就不存在，`npm start` 会直接失败。手动补：
+
+```powershell
+$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
+node node_modules\electron\install.js
+```
+
+**2. 国内网络下载 electron-builder 的辅助二进制很慢或失败。** 先设好镜像和缓存目录：
+
+```powershell
+$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
+$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'
+$env:ELECTRON_BUILDER_CACHE="$PWD\.eb-cache"
+npm run dist
+```
+
+如果 `electron-builder` 报临时文件相关的错误（`!tempfile: Unable to create temporary file`），
+把 `TEMP` 指到项目内再跑：
+
+```powershell
+$env:TEMP="$PWD\.tmp"; $env:TMP="$PWD\.tmp"
+npm run dist
 ```
 
 ---
@@ -197,7 +246,7 @@ my_diary/
 ```bash
 npm install          # 需要 electron@19.1.9
 npm start            # 直接运行（会先同步 vendor/）
-npm run dist         # 打包（产物在 dist/）
+npm run dist         # 打包（产物在 release/）
 ```
 
 **Electron 版本必须是 19.1.9。** 因为与官方客户端共用同一个 Chromium profile 目录，
@@ -209,17 +258,17 @@ npm run dist         # 打包（产物在 dist/）
 
 ### 打包注意
 
+产物输出到 `release/`：
+
+```
+release/
+  win-unpacked/                未压缩的程序目录（安装脚本用的就是它）
+  我的日记-安装包-1.0.0.exe      NSIS 安装包
+```
+
 `package.json` 里已设 `electronDist: node_modules/electron/dist`，避免重新下载 Electron。
 `signAndEditExecutable: false` 跳过签名与 exe 改写（不需要证书），
 因此 **exe 本身没有自定义图标和版本信息**，图标由快捷方式指定。
-
-若 `electron-builder` 因下载缓存或临时文件失败，可显式指定目录：
-
-```powershell
-$env:TEMP='<项目>\.tmp'
-$env:ELECTRON_BUILDER_CACHE='<项目>\.eb-cache'
-npx electron-builder --win nsis
-```
 
 ---
 
@@ -229,7 +278,7 @@ npx electron-builder --win nsis
 powershell -ExecutionPolicy Bypass -File tools\install.ps1
 ```
 
-把 `dist/win-unpacked` 复制到 `%LOCALAPPDATA%\Programs\我的日记`，
+把 `release/win-unpacked` 复制到 `%LOCALAPPDATA%\Programs\我的日记`，
 创建开始菜单与桌面快捷方式（指向随包的 `icon.ico`），并写入 HKCU 卸载项。
 卸载脚本 `uninstall.ps1` 会一并生成到安装目录。
 
@@ -283,7 +332,7 @@ Get-Content _sync_test.log
 - 可以给本程序单独指定数据目录：设环境变量 `MYDIARY_USER_DATA` 指向一份副本即可
   （用于测试，或想与官方客户端隔离运行）。
 
-### 改代码时的两个坑
+### 改代码时的三个坑
 
 1. **不要用 `window.prompt()`**。Electron 明确不支持，调用即抛
    `Error: prompt() is and will not be supported.`。在 async 事件处理里这个异常会被
@@ -291,6 +340,9 @@ Get-Content _sync_test.log
    （`askText` / `askConfirm`）。
 2. **`file://` 页面共享同一个 IndexedDB**（`IndexedDB/file__0.indexeddb.leveldb`），
    所以渲染进程的加载路径换了也仍指向同一个 `diary` 库。
+3. **`tools/install.ps1` 必须保存为 UTF-8 with BOM**（文件头为 `EF BB BF`）。
+   Windows PowerShell 5.1 对没有 BOM 的文件按 ANSI 解码，脚本里的中文会变乱码。
+   很多编辑器保存时会悄悄去掉 BOM，改完这个文件记得确认一下。
 
 ---
 

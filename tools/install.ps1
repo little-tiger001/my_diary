@@ -4,8 +4,9 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Root    = 'C:\Users\zhang\Documents\deepseek-harness\default-workspace\my_diary'
-$Source  = Join-Path $Root 'dist\win-unpacked'
+# 从脚本自身位置推导项目根目录，这样 clone 到任何路径都能直接用
+$Root    = Split-Path $PSScriptRoot -Parent
+$Source  = Join-Path $Root 'release\win-unpacked'
 $Dest    = Join-Path $env:LOCALAPPDATA 'Programs\我的日记'
 $ExeName = '我的日记.exe'
 $AppName = '我的日记'
@@ -97,4 +98,5 @@ Write-Host "  程序:     $TargetExe"
 Write-Host "  开始菜单: $StartMenu"
 Write-Host "  桌面:     $Desktop"
 Write-Host "  卸载:     设置 > 应用 > 我的日记"
+
 

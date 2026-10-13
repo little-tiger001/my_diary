@@ -26,7 +26,7 @@
     "productName": "我的日记",
     "electronDist": "node_modules/electron/dist",
     "directories": {
-      "output": "dist",
+      "output": "release",
       "buildResources": "build"
     },
     "files": [
