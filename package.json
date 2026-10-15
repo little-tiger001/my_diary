@@ -9,6 +9,7 @@
   "scripts": {
     "sync-vendor": "node tools/sync_vendor.js",
     "start": "node tools/sync_vendor.js && electron .",
+    "test": "node tools/sync_vendor.js && node tools/run_tests.js",
     "dist": "node tools/sync_vendor.js && electron-builder --win nsis"
   },
   "dependencies": {

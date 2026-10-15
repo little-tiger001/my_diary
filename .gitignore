@@ -4,6 +4,7 @@ release/
 dist/
 .eb-cache/
 .tmp/
+.tmp-*/
 .tmp-probe/
 
 # 运行时的第三方库副本，由 `npm run sync-vendor` 从 node_modules 生成

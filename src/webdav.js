@@ -7,12 +7,13 @@ const { URL } = require('url');
 /* ===========================================================================
  * WebDAV 客户端 —— 实现与《一本日记》兼容的第三方同步协议
  *
- *   服务地址（sync_type）：
- *     2 = https://dav.jianguoyun.com/dav   （坚果云）
- *     3 = https://dav.box.com/dav          （box）
- *     4 = localStorage.wd_url              （自定义 WebDAV）
+ *   本程序只支持「自定义 WebDAV 地址」一种配置。
+ *   官方客户端的 sync_type（2=坚果云、3=box、4=自定义）只是替它自己选 base 的开关；
+ *   远端布局、认证方式、文件内容在所有 base 下完全相同，所以本程序直接填地址即可，
+ *   填官方客户端正在用的那个 base（比如坚果云的 https://dav.jianguoyun.com/dav）
+ *   一样能互通。
  *
- *   认证：请求头 Authorization，即 localStorage.auth（"Basic <base64>"）
+ *   认证：请求头 Authorization，即 "Basic <base64(账号:密码)>"
  *
  *   远端文件：
  *     ${base}/diary/diary.json   主数据，四个字段各自是被 JSON.stringify 过的字符串
@@ -20,15 +21,14 @@ const { URL } = require('url');
  *     ${base}/diary/<名>_<字节数>.<扩展名>   图片
  *
  *   建目录：MKCOL ${base}/diary/，409/405/200/201 都算成功
+ *
+ *   重定向：3xx 一律按同样的方法与请求体重发（最多 5 跳），但只跟同主机的跳转——
+ *   请求头里带着 Basic 账号密码，跨主机跟随等于把密码发给第三方。
  * =========================================================================== */
 
-const JIANGUOYUN = 'https://dav.jianguoyun.com/dav';
-const BOX = 'https://dav.box.com/dav';
 const OCTET = 'application/octet-stream;charset=UTF-8';
 
-function resolveBase(syncType, customUrl) {
-  if (Number(syncType) === 2) return JIANGUOYUN;
-  if (Number(syncType) === 3) return BOX;
+function resolveBase(customUrl) {
   return String(customUrl || '').replace(/\/+$/, '');
 }
 
@@ -49,7 +49,7 @@ function buildUrl(base, relPath) {
   return base.replace(/\/+$/, '') + '/' + encodePath(relPath.replace(/^\/+/, ''));
 }
 
-function request(fullUrl, method, { auth, body, headers, selfSigned } = {}) {
+function request(fullUrl, method, { auth, body, headers, selfSigned } = {}, hops = 0) {
   return new Promise((resolve, reject) => {
     let url;
     try {
@@ -62,10 +62,7 @@ function request(fullUrl, method, { auth, body, headers, selfSigned } = {}) {
     if (auth) h.Authorization = auth;
 
     let payload = null;
-    if (body !== undefined && body !== null && method !== 'GET' && method !== 'PROPFIND') {
-      payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8');
-      h['Content-Length'] = payload.length;
-    } else if (body !== undefined && body !== null) {
+    if (body !== undefined && body !== null) {
       payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8');
       h['Content-Length'] = payload.length;
     }
@@ -84,7 +81,31 @@ function request(fullUrl, method, { auth, body, headers, selfSigned } = {}) {
       (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+        res.on('end', async () => {
+          // 3xx：有的云盘会把 http 挑到 https、或把路径归一化后返回重定向。
+          // 不跟随的话表现为一个莫名其妙的 HTTP 301/302。按同样的方法与请求体重发（最多 5 跳）。
+          const loc = res.headers && res.headers.location;
+          if (loc && res.statusCode >= 300 && res.statusCode < 400) {
+            if (hops >= 5) return reject(new Error('WebDAV 重定向次数过多：' + fullUrl));
+            let next = null;
+            try {
+              next = new URL(loc, fullUrl);
+            } catch (e) {
+              return reject(new Error('WebDAV 重定向地址无效：' + loc));
+            }
+            // 请求头里带着 Basic 账号密码，所以只跟同主机的跳转。
+            // 允许 http -> https（同主机），跨主机一律拒绝，否则等于把密码发给第三方。
+            if (next.hostname !== url.hostname) {
+              return reject(new Error('WebDAV 重定向到其它主机，已拒绝（避免账号密码被发到第三方）：' + loc));
+            }
+            try {
+              return resolve(await request(next.toString(), method, { auth, body, headers, selfSigned }, hops + 1));
+            } catch (e) {
+              return reject(e);
+            }
+          }
+          resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) });
+        });
       }
     );
     req.on('timeout', () => req.destroy(new Error('WebDAV 请求超时（60 秒）')));
@@ -95,7 +116,7 @@ function request(fullUrl, method, { auth, body, headers, selfSigned } = {}) {
 }
 
 function describeStatus(status) {
-  if (status === 401) return '认证失败（401）：账号或密码不对。坚果云需要用「应用密码」，不是登录密码';
+  if (status === 401) return '认证失败（401）：账号或密码不对。若云盘提供「应用密码」，要填应用密码而不是登录密码';
   if (status === 403) return '没有权限（403）';
   if (status === 404) return '路径不存在（404）';
   if (status === 409) return '父目录不存在（409）';
@@ -118,7 +139,7 @@ async function collectionExists(target, auth, selfSigned) {
 async function ensureCollection(base, auth, selfSigned) {
   // MKCOL 的语义在服务器之间不统一：
   //   405 = 已存在；409 既可能是「已存在」也可能是「父目录不存在」。
-  // 原版把 200/201/405/409 一律当成功（它的 base 是坚果云根，父目录必然存在）。
+  // 官方客户端把 200/201/405/409 一律当成功（它用的 base 父目录必然存在）。
   // 自定义 WebDAV 时父目录常常不存在，所以这里用 PROPFIND 把 409 区分开。
   const mkcol = (url) =>
     request(url, 'MKCOL', { auth, headers: { 'Content-Type': OCTET }, selfSigned });
@@ -153,13 +174,20 @@ async function ensureCollection(base, auth, selfSigned) {
   throw new Error('无法创建云盘目录：' + describeStatus(res.status));
 }
 
-async function getDiaryJson(base, auth, selfSigned) {
+// 取原始文本：覆盖远端之前要原样留一份底，所以不能只拿 parse 之后的对象。
+// 远端没有这个文件、或文件是空的，都返回 null。
+async function getDiaryJsonText(base, auth, selfSigned) {
   const url = buildUrl(base, 'diary/diary.json');
   const res = await request(url, 'GET', { auth, selfSigned });
   if (res.status === 404) return null;
   if (res.status !== 200) throw new Error('读取 diary.json 失败：' + describeStatus(res.status));
   const text = res.body.toString('utf8');
-  if (!text.trim()) return null;
+  return text.trim() ? text : null;
+}
+
+async function getDiaryJson(base, auth, selfSigned) {
+  const text = await getDiaryJsonText(base, auth, selfSigned);
+  if (!text) return null;
   try {
     return JSON.parse(text);
   } catch (e) {
@@ -235,13 +263,12 @@ async function check(base, auth, selfSigned) {
 }
 
 module.exports = {
-  JIANGUOYUN,
-  BOX,
   resolveBase,
   basicAuth,
   check,
   ensureCollection,
   getDiaryJson,
+  getDiaryJsonText,
   putDiaryJson,
   getSyncInfoRaw,
   putSyncInfoRaw,

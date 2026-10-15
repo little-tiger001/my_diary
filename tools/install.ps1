@@ -2,11 +2,18 @@
 # 不依赖 electron-builder 的 NSIS 安装器（在当前环境下行为不可观测），
 # 直接复制已打包的 win-unpacked，并自行创建快捷方式与卸载项。
 
+param(
+  # 默认安装项目里的 release\win-unpacked。
+  # 项目目录若在同步盘（Seafile 等）里，release 下的文件可能被同步客户端锁住而无法重建，
+  # 这时可以把构建输出到别处，再用 -Source 指过去安装。
+  [string]$Source = ''
+)
+
 $ErrorActionPreference = 'Stop'
 
 # 从脚本自身位置推导项目根目录，这样 clone 到任何路径都能直接用
 $Root    = Split-Path $PSScriptRoot -Parent
-$Source  = Join-Path $Root 'release\win-unpacked'
+if (-not $Source) { $Source = Join-Path $Root 'release\win-unpacked' }
 $Dest    = Join-Path $env:LOCALAPPDATA 'Programs\我的日记'
 $ExeName = '我的日记.exe'
 $AppName = '我的日记'

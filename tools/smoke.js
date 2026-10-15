@@ -9,22 +9,24 @@ console.log('userData = ' + SHARED_USER_DATA);
 
 const ROOT = path.join(__dirname, '..');
 
+// 必须注册 IPC：app.js 的 onMounted 第一句就是 fileApi.getPath()（sendSync），
+// 没有监听者会直接抛错，后面的 openDb / countPendingImages / window.__mydiary 全都不会执行。
+// 这个测试只读库，但页面得先真的挂起来，冒烟才有意义。
+const appMain = require(path.join(ROOT, 'src', 'main.js'));
+
 const PROBE = `
 (async () => {
   const out = { userAgent: navigator.userAgent };
   try {
-    const probe = new Dexie('diary');
-    probe.version(1).stores({
-      diary: '++id, title, content, createTime, updateTime, recordTime, images, localImages, city, address, temperature, weather, color, dayOfMonth, monthOfYear, year, latitude, longitude, deleted, uuid, synced, isHidden, device, category, type, audio, localAudio, contentType, tag, historyTime, draw, localDraw, top, bt, m, ind',
-      category: '++id, name, count, pic, isDeleted, uuid, recordModelId, createTime, updateTime, synced',
-      recordModel: '++id, content, position, order, title, contentType, name, uuid, isDelete, isDefault, createTime, updateTime, synced',
-      tag: '++id, name, deleted, uuid, order, lock, createTime, updateTime, synced'
-    });
-    probe.version(2).stores({ history: '++id, content, uuid, createTime' });
-    probe.version(3).stores({ draft: '++id, title, content, uuid, createTime, shown' });
+    // schema 来自 src/schema.js（index.html 已加载），不再在这里抄一遍：
+    // 抄本一旦漂移，这个"校验 schema 与原版一致"的测试就会给出假信号。
+    out.hasSharedSchema = typeof MYDIARY_SCHEMA !== 'undefined';
+    if (!out.hasSharedSchema) throw new Error('MYDIARY_SCHEMA 未加载');
+    const probe = MYDIARY_SCHEMA.apply(new Dexie(MYDIARY_SCHEMA.DB_NAME));
 
     await probe.open();
     out.verno = probe.verno;
+    out.declaredVersion = MYDIARY_SCHEMA.DB_VERSION;
     out.tables = probe.tables.map(t => t.name).sort();
 
     const all = await probe.diary.toArray();
@@ -60,6 +62,9 @@ const PROBE = `
 `;
 
 app.whenReady().then(async () => {
+  appMain.ensureDirs();
+  appMain.registerIpc();
+
   const win = new BrowserWindow({
     show: false,
     webPreferences: {
@@ -89,8 +94,10 @@ app.whenReady().then(async () => {
        hasDexie: typeof Dexie !== 'undefined',
        hasMarkdownit: typeof markdownit !== 'undefined',
        hasEcharts: typeof echarts !== 'undefined',
+       hasSharedSchema: typeof MYDIARY_SCHEMA !== 'undefined',
        mounted: !!document.querySelector('.topbar') || !!document.querySelector('.fatal'),
-       fatalText: document.querySelector('.fatal-msg') ? document.querySelector('.fatal-msg').textContent : ''
+       fatalText: document.querySelector('.fatal-msg') ? document.querySelector('.fatal-msg').textContent : '',
+       hasApi: !!window.__mydiary
      })`
   );
   console.log('APP STATE: ' + JSON.stringify(appState, null, 2));
@@ -99,5 +106,7 @@ app.whenReady().then(async () => {
   console.log('PROBE RESULT:');
   console.log(JSON.stringify(result, null, 2));
 
-  app.exit(result && result.ok ? 0 : 1);
+  // 光看库能不能读不够：IPC 没注册 / schema 缺失 / Vue 报错都会让页面根本没挂起来
+  const uiOk = !!(appState && appState.mounted && appState.hasApi && !appState.fatalText);
+  app.exit(result && result.ok && uiOk ? 0 : 1);
 });

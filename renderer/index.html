@@ -146,7 +146,8 @@
           <p class="warn">
             本程序与原版「一本日记」<b>共用同一份数据</b>。同一时刻只能运行其中一个，
             否则 IndexedDB 会加锁失败。新写入的记录一律标记为「已同步」，
-            避免原版把它上传到厂商服务器。
+            避免原版把它上传到厂商服务器。删除日记是<b>打删除标记</b>而不是抹掉记录，
+            这样同步才能把删除一并传给手机端。
           </p>
 
           <h3>本地备份</h3>
@@ -165,20 +166,14 @@
             手机端《一本日记》选择<strong>同一个云盘账号</strong>即可与本程序互通。
           </p>
           <div class="form">
-            <label>云盘类型
-              <select v-model.number="dav.syncType">
-                <option :value="2">坚果云</option>
-                <option :value="4">自定义 WebDAV</option>
-              </select>
-            </label>
-            <label v-if="dav.syncType === 4">WebDAV 地址
+            <label>WebDAV 地址
               <input v-model="dav.customUrl" placeholder="https://dav.example.com/dav/">
             </label>
             <label>账号
-              <input v-model="dav.username" placeholder="坚果云填登录邮箱">
+              <input v-model="dav.username" placeholder="登录账号">
             </label>
             <label>密码
-              <input v-model="dav.password" type="password" placeholder="坚果云填「应用密码」">
+              <input v-model="dav.password" type="password" placeholder="若云盘提供应用密码，填应用密码">
             </label>
             <label class="chk"><input type="checkbox" v-model="dav.selfSigned"> 忽略自签名证书</label>
           </div>
@@ -192,6 +187,10 @@
             <button class="btn" @click="syncDownloadOnly">仅下载合并</button>
           </div>
           <p class="dim" v-if="dav.lastSync">上次同步：{{ dav.lastSync }}</p>
+          <p class="dim" v-if="dav.lastSnapshot">
+            覆盖云端前已留底：<span class="mono">{{ dav.lastSnapshot }}</span>
+            （在数据目录的 <span class="mono">mydiary-remote-backup/</span>，保留最近 5 份）
+          </p>
           <p class="warn" v-if="dav.lastError">上次错误：{{ dav.lastError }}</p>
         </div>
       </section>
@@ -240,7 +239,7 @@
       <h3>{{ dialog.title }}</h3>
       <p v-if="dialog.hint" class="dim">{{ dialog.hint }}</p>
       <input v-if="dialog.kind === 'text'" v-model="dialog.value"
-             @keyup.enter="dialogOk" @keyup.esc="dialogCancel">
+             @keyup.enter="dialogOk">
       <div class="modal-btns">
         <button class="btn" @click="dialogCancel">取消</button>
         <button class="btn primary" @click="dialogOk">{{ dialog.okText }}</button>
@@ -253,6 +252,7 @@
 <script src="../vendor/dexie.min.js"></script>
 <script src="../vendor/markdown-it.min.js"></script>
 <script src="../vendor/echarts.min.js"></script>
+<script src="../src/schema.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

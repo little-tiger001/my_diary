@@ -1,5 +1,5 @@
 // 最小 WebDAV 服务器，仅用于验证同步协议。内存存储，支持 GET / PUT / MKCOL / DELETE / PROPFIND。
-// /__dump 返回已存路径与内容摘要（测试用，不属于 WebDAV）。
+// /__dump 返回已存路径与内容摘要，/__reset 清空存储（都只用于测试，不属于 WebDAV）。
 const http = require('http');
 
 const PORT = Number(process.env.DAV_PORT || 8099);
@@ -32,9 +32,31 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify(out));
   }
 
+  // 服务器是常驻的内存存储，跑完一轮还留着上一轮的数据（包括故意写坏的那份）。
+  // 测试开头先清空，才能重复运行。
+  if (p === '/__reset') {
+    store.clear();
+    dirs.clear();
+    dirs.add('/');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end('{"ok":true}');
+  }
+
   if (REQUIRE_AUTH && req.headers.authorization !== REQUIRE_AUTH) {
     res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="dav"' });
     return res.end('unauthorized');
+  }
+
+  // 用于验证客户端会跟随 3xx：路径里的 __redirect__ 段去掉后 302 回真实路径。
+  if (p.indexOf('/__redirect__/') >= 0) {
+    res.writeHead(302, { Location: p.replace('/__redirect__', '') });
+    return res.end();
+  }
+
+  // 用于验证跨主机跳转会被拒绝（客户端请求头里带着 Basic 账号密码）
+  if (p.indexOf('/__crosshost__/') >= 0) {
+    res.writeHead(302, { Location: 'http://localhost:' + PORT + p.replace('/__crosshost__', '') });
+    return res.end();
   }
 
   const chunks = [];

@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { app, BrowserWindow, ipcMain, shell, clipboard, Menu, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const webdav = require('./webdav');
 
 // ---------------------------------------------------------------------------
@@ -17,6 +17,10 @@ app.setPath('userData', SHARED_USER_DATA);
 const USER_DATA = SHARED_USER_DATA;
 const DATA_DIR = path.join(USER_DATA, 'data');
 const IMAGES_DIR = path.join(USER_DATA, 'images');
+// 本程序自己的目录：覆盖远端 diary.json 之前留的底。
+// 原版不认识这个目录，不会去动它。
+const SNAPSHOT_DIR = path.join(USER_DATA, 'mydiary-remote-backup');
+const SNAPSHOT_KEEP = 5;
 
 // 原版硬编码密钥，用于 data/ 目录下的备份文件（AES-256-ECB，hex）
 const BACKUP_SECRET = '2909246C549D656546C40576393A78802F787959012E551EADE697707B4579C0';
@@ -24,7 +28,6 @@ const BACKUP_KEY = Buffer.from(BACKUP_SECRET, 'hex');
 
 // 第三方同步 si 文件用的固定口令
 const SYNC_SECRET = '9ejc8kdq';
-const SYNC_VERSION = 1;
 
 function ensureDirs() {
   for (const d of [DATA_DIR, IMAGES_DIR]) {
@@ -58,19 +61,18 @@ function signDecodeAes(secret, cipherB64) {
   return d.update(cipherB64, 'base64', 'utf8') + d.final('utf8');
 }
 
-// 注意：绝不能去碰 IndexedDB 目录下的 LOCK 文件 —— LevelDB 的 LOCK 是 fcntl 锁，
-// 删除它会让正在运行的实例写坏数据。这里只做只读探测：能否独占打开 LOCK 文件。
-// 真正的冲突判定交给 IndexedDB 打开失败（见渲染进程的错误处理）。
-function originalIsRunning() {
-  const lock = path.join(USER_DATA, 'IndexedDB', 'file__0.indexeddb.leveldb', 'LOCK');
-  if (!fs.existsSync(lock)) return false;
-  try {
-    const fd = fs.openSync(lock, 'r+');
-    fs.closeSync(fd);
-    return false; // 能打开说明没人独占，但 LevelDB 用的是 fcntl，结论仅供参考
-  } catch (e) {
-    return true;
-  }
+// 同步是全量 PUT，没有增量：一旦本地数据有问题，覆盖上去就把云端记录销毁了。
+// 所以每次写远端之前先把当前的 diary.json 原样存一份，只保留最近几份。
+function writeSnapshot(text) {
+  if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+  const name = 'diary-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+  fs.writeFileSync(path.join(SNAPSHOT_DIR, name), text, 'utf8');
+  const old = fs
+    .readdirSync(SNAPSHOT_DIR)
+    .filter((f) => /^diary-.*\.json$/.test(f))
+    .sort();
+  while (old.length > SNAPSHOT_KEEP) fs.unlinkSync(path.join(SNAPSHOT_DIR, old.shift()));
+  return name;
 }
 
 let mainWindow = null;
@@ -122,21 +124,23 @@ if (require.main === module) {
   }
 }
 
-module.exports = { registerIpc, ensureDirs, SHARED_USER_DATA, USER_DATA, DATA_DIR, IMAGES_DIR };
+module.exports = {
+  registerIpc,
+  ensureDirs,
+  writeSnapshot,
+  SHARED_USER_DATA,
+  USER_DATA,
+  DATA_DIR,
+  IMAGES_DIR,
+  SNAPSHOT_DIR
+};
 
+// 暴露给渲染进程的接口只保留真正用到的那些。
+// 之前还挂着一批没人调用的桥接，其中 readTextFile / writeTextFile 接受任意路径，
+// 等于把整个文件系统读写交给页面——纯负担的攻击面，已删除。
+// 剩下这几个仍然收路径的接口（saveImage / webdavUploadImage）都在下面各自校验了来源。
 function registerIpc() {
   ipcMain.on('getPath', (e) => { e.returnValue = USER_DATA; });
-  ipcMain.on('getOS', (e) => { e.returnValue = process.platform === 'darwin' ? 'mac' : 'win'; });
-  ipcMain.on('getVersion', (e) => { e.returnValue = app.getVersion(); });
-
-  ipcMain.on('originalRunning', (e) => { e.returnValue = originalIsRunning(); });
-
-  ipcMain.on('signAes', (e, { secret, text }) => {
-    try { e.returnValue = signAes(secret, text); } catch (err) { e.returnValue = ''; }
-  });
-  ipcMain.on('signDecodeAes', (e, { secret, text }) => {
-    try { e.returnValue = signDecodeAes(secret, text); } catch (err) { e.returnValue = ''; }
-  });
 
   // ---- WebDAV（原版第三方同步协议）----
   const wrap = (fn) => async (evt, payload) => {
@@ -148,12 +152,10 @@ function registerIpc() {
   };
 
   const davTarget = (cfg) => ({
-    base: webdav.resolveBase(cfg.syncType, cfg.customUrl),
+    base: webdav.resolveBase(cfg.customUrl),
     auth: webdav.basicAuth(cfg.username, cfg.password),
     selfSigned: !!cfg.selfSigned
   });
-
-  ipcMain.handle('webdavBase', wrap((cfg) => webdav.resolveBase(cfg.syncType, cfg.customUrl)));
 
   ipcMain.handle('webdavCheck', wrap(async (cfg) => {
     const t = davTarget(cfg);
@@ -170,6 +172,13 @@ function registerIpc() {
   ipcMain.handle('webdavPutDiaryJson', wrap(async ({ cfg, payload }) => {
     const t = davTarget(cfg);
     return webdav.putDiaryJson(t.base, t.auth, payload, t.selfSigned);
+  }));
+
+  // 覆盖远端前留底；远端还没有 diary.json 时返回 null（首次同步，无底可留）
+  ipcMain.handle('webdavSnapshotRemote', wrap(async (cfg) => {
+    const t = davTarget(cfg);
+    const text = await webdav.getDiaryJsonText(t.base, t.auth, t.selfSigned);
+    return text ? writeSnapshot(text) : null;
   }));
 
   ipcMain.handle('webdavGetSi', wrap(async (cfg) => {
@@ -190,46 +199,24 @@ function registerIpc() {
   }));
 
   ipcMain.handle('webdavUploadImage', wrap(async ({ cfg, localPath }) => {
+    if (!insideImages(localPath)) throw new Error('只能上传 images/ 目录里的本地图片：' + localPath);
     const t = davTarget(cfg);
     return webdav.uploadImage(t.base, t.auth, localPath, t.selfSigned);
   }));
 
-  ipcMain.handle('webdavSign', wrap(({ text }) => signAes(SYNC_SECRET, text)));
-
-  ipcMain.handle('blur', async () => { if (mainWindow) mainWindow.blur(); });
-
-  ipcMain.handle('saveFile', async (e, { url, fileName, file }) => {
-    try {
-      const res = await dialog.showSaveDialog(mainWindow, { defaultPath: fileName });
-      if (res.canceled || !res.filePath) return '';
-      if (file && fs.existsSync(file)) fs.copyFileSync(file, res.filePath);
-      return res.filePath;
-    } catch (err) {
-      return '';
-    }
-  });
-
-  ipcMain.handle('exportTextFile', async (e, { fileName, content }) => {
-    const res = await dialog.showSaveDialog(mainWindow, { defaultPath: fileName });
-    if (res.canceled || !res.filePath) return '';
-    fs.writeFileSync(res.filePath, content, 'utf8');
-    return res.filePath;
-  });
-
-  ipcMain.handle('importTextFile', async () => {
-    const res = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openFile'],
-      filters: [{ name: 'JSON', extensions: ['json'] }, { name: '所有文件', extensions: ['*'] }]
-    });
-    if (res.canceled || !res.filePaths.length) return '';
-    return fs.readFileSync(res.filePaths[0], 'utf8');
-  });
-
   // ---- 备份文件：与原版 data/{userId}{syncType} 双向兼容 ----
+  // 名字来自共享 localStorage（b / sync_type），和图片名一样按不可信输入校验：
+  // 不校验的话 "../../x" 就能写到数据目录外。
+  const dataFileName = (name) => {
+    const base = path.basename(String(name));
+    if (!base || base !== String(name) || base === '.' || base === '..') throw new Error('备份文件名不合法：' + name);
+    return path.join(DATA_DIR, base);
+  };
+
   ipcMain.handle('saveData', async (e, { name, text }) => {
     ensureDirs();
     try {
-      fs.writeFileSync(path.join(DATA_DIR, String(name)), backupEncrypt(String(text)));
+      fs.writeFileSync(dataFileName(name), backupEncrypt(String(text)));
       return true;
     } catch (err) {
       return false;
@@ -238,7 +225,12 @@ function registerIpc() {
 
   ipcMain.handle('getData', async (e, { name }) => {
     ensureDirs();
-    const p = path.join(DATA_DIR, String(name));
+    let p;
+    try {
+      p = dataFileName(name);
+    } catch (err) {
+      return '';
+    }
     if (!fs.existsSync(p)) return '';
     try {
       return backupDecrypt(fs.readFileSync(p, 'utf8'));
@@ -256,66 +248,71 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('deleteData', async (e, { name }) => {
-    const p = path.join(DATA_DIR, String(name));
-    if (fs.existsSync(p)) fs.unlinkSync(p);
-    return true;
-  });
-
   // ---- 本地图片：与原版 userData/images 一致 ----
+  // 名字一律是本程序自己生成的 uuid + 扩展名，这里再校验一次，避免路径穿越写到目录外。
+  const imageName = (name) => {
+    const base = path.basename(String(name));
+    if (!base || base !== String(name) || base === '.' || base === '..') throw new Error('图片名不合法：' + name);
+    return path.join(IMAGES_DIR, base);
+  };
+
+  // 能进 images/ 的扩展名。saveImage 走的是「用户在文件框里挑一个文件，主进程复制进来」，
+  // 来源路径是渲染进程给的，属于不可信输入：不校验就等于给了页面一个
+  // 「把本机任意文件复制进图片目录」的口子。
+  const IMAGE_EXTS = new Set([
+    '.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.apng', '.gif', '.webp',
+    '.bmp', '.ico', '.svg', '.heic', '.heif', '.avif', '.tif', '.tiff'
+  ]);
+
+  const safeExt = (ext, fallback) =>
+    IMAGE_EXTS.has(String(ext || '').toLowerCase()) ? String(ext).toLowerCase() : fallback;
+
+  // 上传只允许上传 images/ 目录里的图。渲染进程给的 localPath 一律当不可信输入：
+  // 之前直接交给 fs.readFileSync 再 PUT 出去，等于"读本机任意文件并传到云盘"。
+  const insideImages = (p) => {
+    const abs = path.resolve(String(p || ''));
+    return abs.startsWith(path.resolve(IMAGES_DIR) + path.sep);
+  };
+
   ipcMain.handle('saveImage', async (e, { sourcePath }) => {
     ensureDirs();
-    const ext = path.extname(sourcePath) || '.jpeg';
+    const src = path.resolve(String(sourcePath || ''));
+    if (!fs.existsSync(src) || !fs.statSync(src).isFile()) throw new Error('图片文件不存在：' + sourcePath);
+    const ext = path.extname(src).toLowerCase();
+    if (!IMAGE_EXTS.has(ext)) throw new Error('不支持的文件类型：' + (ext || '(无扩展名)'));
     const name = crypto.randomUUID().replace(/-/g, '') + ext;
-    fs.copyFileSync(sourcePath, path.join(IMAGES_DIR, name));
+    fs.copyFileSync(src, path.join(IMAGES_DIR, name));
     return name;
   });
 
   ipcMain.handle('saveImageBuffer', async (e, { buffer, ext }) => {
     ensureDirs();
-    const name = crypto.randomUUID().replace(/-/g, '') + (ext || '.jpeg');
+    const name = crypto.randomUUID().replace(/-/g, '') + safeExt(ext, '.jpeg');
     fs.writeFileSync(path.join(IMAGES_DIR, name), Buffer.from(buffer));
     return name;
   });
 
-  ipcMain.handle('imageExists', async (e, { name }) => fs.existsSync(path.join(IMAGES_DIR, name)));
+  ipcMain.handle('imageExists', async (e, { name }) => fs.existsSync(imageName(name)));
 
   ipcMain.handle('deleteImage', async (e, { name }) => {
-    const p = path.join(IMAGES_DIR, name);
+    const p = imageName(name);
     if (fs.existsSync(p)) fs.unlinkSync(p);
     return true;
   });
 
-  ipcMain.handle('listImages', async () => {
-    ensureDirs();
-    try {
-      return fs.readdirSync(IMAGES_DIR).filter((f) => fs.statSync(path.join(IMAGES_DIR, f)).isFile());
-    } catch (err) {
-      return [];
-    }
+  ipcMain.handle('exportTextFile', async (e, { fileName, content }) => {
+    const res = await dialog.showSaveDialog(mainWindow, { defaultPath: fileName });
+    if (res.canceled || !res.filePath) return '';
+    fs.writeFileSync(res.filePath, content, 'utf8');
+    return res.filePath;
   });
 
-  ipcMain.handle('openExternal', async (e, { url }) => { shell.openExternal(url); });
-
-  ipcMain.handle('copyText', async (e, { text }) => { clipboard.writeText(String(text)); return true; });
-
-  ipcMain.handle('readTextFile', async (e, { filePath }) => {
-    try { return fs.readFileSync(filePath, 'utf8'); } catch (err) { return ''; }
+  ipcMain.handle('importTextFile', async () => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }, { name: '所有文件', extensions: ['*'] }]
+    });
+    if (res.canceled || !res.filePaths.length) return '';
+    return fs.readFileSync(res.filePaths[0], 'utf8');
   });
-
-  ipcMain.handle('writeTextFile', async (e, { filePath, content }) => {
-    try { fs.writeFileSync(filePath, content, 'utf8'); return true; } catch (err) { return false; }
-  });
-
-  // ---- 右键菜单：替代原版的 popCopyRightMenu / popEditRightMenu ----
-  const editMenu = Menu.buildFromTemplate([
-    { role: 'undo', label: '撤销' },
-    { role: 'redo', label: '重做' },
-    { type: 'separator' },
-    { role: 'cut', label: '剪切' },
-    { role: 'copy', label: '复制' },
-    { role: 'paste', label: '粘贴' },
-    { role: 'selectAll', label: '全选' }
-  ]);
-  ipcMain.on('popEditRightMenu', () => { editMenu.popup({ window: mainWindow }); });
 }

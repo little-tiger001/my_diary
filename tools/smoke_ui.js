@@ -15,6 +15,13 @@ function check(name, ok, detail) {
   log((ok ? 'PASS  ' : 'FAIL  ') + name + (detail ? '  — ' + detail : ''));
 }
 
+// 这个测试会真的往库里写分类和标签，绝不能对着真实数据跑。
+// src/main.js 在 require 时就会 app.setPath('userData', ...)，所以必须先确认环境变量。
+if (!process.env.MYDIARY_USER_DATA) {
+  console.error('需要设置 MYDIARY_USER_DATA（一份数据目录副本）：本测试会写入分类/标签');
+  process.exit(2);
+}
+
 const appMain = require(path.join(ROOT, 'src', 'main.js'));
 
 setTimeout(() => { log('!! 硬超时'); finish(4); }, 90000);
@@ -137,6 +144,24 @@ app.whenReady().then(async () => {
   })()`);
   check('取消后弹窗关闭且未创建记录', cancelled.modalGone && cancelled.noRecord, JSON.stringify(cancelled));
 
+  // ---------- Esc 关闭弹窗 ----------
+  // 确认型弹窗没有输入框，没有元素能挂 esc；改成在窗口上收键之后两种弹窗都该能被 Esc 关掉
+  await js(`document.querySelectorAll('.side-block')[1].querySelector('.side-title .mini').click()`);
+  await sleep(300);
+  const escBefore = await js(`(() => {
+    const before = !!document.querySelector('.modal');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return before;
+  })()`);
+  await sleep(300);
+  const escAfter = await js(`!document.querySelector('.modal')`);
+  const escNoRecord = await js(`(async () => {
+    const t = await window.__mydiary.db.tag.where('name').equals('__UI测试标签2__').first();
+    return !t;
+  })()`);
+  check('Esc 关闭弹窗且不写入记录', !!(escBefore && escAfter && escNoRecord),
+    'before=' + escBefore + ' after=' + escAfter + ' noRecord=' + escNoRecord);
+
   // ---------- 侧栏里出现并可筛选 ----------
   const inSidebar = await js(`
     [...document.querySelectorAll('.side-item')].some(el => el.textContent.includes('__UI测试分类__'))
@@ -167,6 +192,74 @@ app.whenReady().then(async () => {
     return c ? { isDeleted: c.isDeleted } : null;
   })()`);
   check('分类已标记删除', !!(afterDelete && Number(afterDelete.isDeleted) === 1), JSON.stringify(afterDelete));
+
+  // ---------- 同名分类要复活墓碑行 ----------
+  // 墓碑行不会从库里消失（删除靠 isDeleted=1）。直接 add 会造出同名的第二行：
+  // 本地看不出来，但全量上传后对端就有两个同名分类，且 uuid 不同、永远不会合并。
+  await js(`document.querySelectorAll('.side-block')[0].querySelector('.side-title .mini').click()`);
+  await sleep(300);
+  await js(`
+    (() => {
+      const inp = document.querySelector('.modal input');
+      inp.value = '__UI测试分类__';
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('.modal .modal-btns .btn.primary').click();
+      return true;
+    })()
+  `);
+  await sleep(700);
+  const revived = await js(`(async () => {
+    const rows = await window.__mydiary.db.category.where('name').equals('__UI测试分类__').toArray();
+    return {
+      total: rows.length,
+      live: rows.filter((r) => !r.isDeleted).length,
+      dead: rows.filter((r) => !!r.isDeleted).length
+    };
+  })()`);
+  check('同名分类复活墓碑行（不产生同名第二行）',
+    !!(revived && revived.total === 1 && revived.live === 1), JSON.stringify(revived));
+
+  // ---------- 未保存改动的脏检查 ----------
+  // 之前 openDiary / newDiary 直接覆盖 editing，写了半天没保存的内容点一下别的日记就没了。
+  await js(`[...document.querySelectorAll('.topbar .btn')].find(b => b.textContent.includes('写日记')).click()`);
+  await sleep(400);
+  check('进入编辑器', !!(await js(`!!document.querySelector('.title-input')`)));
+
+  await js(`
+    (() => {
+      const t = document.querySelector('.title-input');
+      t.value = '__未保存的标题__';
+      t.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()
+  `);
+  await sleep(300);
+
+  await js(`[...document.querySelectorAll('.topbar .btn')].find(b => b.textContent.includes('写日记')).click()`);
+  await sleep(400);
+  const dirtyModal = await js(`(() => {
+    const m = document.querySelector('.modal');
+    return m ? m.querySelector('h3').textContent : null;
+  })()`);
+  check('有未保存改动时切换会拦下来', dirtyModal === '放弃未保存的修改？', String(dirtyModal));
+
+  await js(`document.querySelector('.modal .modal-btns .btn:not(.primary)').click()`);
+  await sleep(400);
+  const keptTitle = await js(`(() => {
+    const t = document.querySelector('.title-input');
+    return { modalGone: !document.querySelector('.modal'), title: t ? t.value : null };
+  })()`);
+  check('选「取消」后改动还在', keptTitle.modalGone && keptTitle.title === '__未保存的标题__', JSON.stringify(keptTitle));
+
+  await js(`[...document.querySelectorAll('.topbar .btn')].find(b => b.textContent.includes('写日记')).click()`);
+  await sleep(400);
+  await js(`document.querySelector('.modal .modal-btns .btn.primary').click()`);
+  await sleep(400);
+  const discarded = await js(`(() => {
+    const t = document.querySelector('.title-input');
+    return { modalGone: !document.querySelector('.modal'), title: t ? t.value : null };
+  })()`);
+  check('选「放弃」后清空草稿', discarded.modalGone && discarded.title === '', JSON.stringify(discarded));
 
   // ---------- 清理 ----------
   await js(`(async () => {
