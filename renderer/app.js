@@ -115,6 +115,9 @@ createApp({
       lastSnapshot: ''
     });
     const davPendingImages = ref(0);
+    // 同步进行中：编辑页的同步按钮据此禁用并显示"同步中…"
+    const syncing = ref(false);
+    let syncQueued = false;
 
     const md = window.markdownit({ html: false, linkify: true, breaks: true });
     const rendered = computed(() => (editing.value ? md.render(editing.value.content || '') : ''));
@@ -409,6 +412,8 @@ createApp({
         sessionImages = [];
         savedSignature = signature();
         toast('已保存', 'ok');
+        // 保存后自动同步（默认开，可在设置页关掉）；失败会自己提示，不影响"已保存"
+        await maybeAutoSync();
       } catch (err) {
         toast('保存失败：' + ((err && err.message) || err), 'err');
       }
@@ -894,28 +899,38 @@ createApp({
     const REMOTE_FORMAT = 3;
 
     function loadDav() {
+      let fromStore = false;
       try {
         const raw = localStorage.getItem(DAV_KEY);
-        if (raw) { dav.value = Object.assign(dav.value, JSON.parse(raw)); return; }
+        if (raw) {
+          dav.value = Object.assign(dav.value, JSON.parse(raw));
+          fromStore = true;
+        }
       } catch (e) { /* 忽略损坏的配置 */ }
 
       // 首次使用：原版 PC 端如果配过第三方同步（它的 sync_type=4 即自定义 WebDAV），
       // 直接沿用它的地址和账号，省得重输。localStorage 与原版共用，
       // wd_url / auth 就是原版存的位置。
-      try {
-        if (Number(localStorage.getItem('sync_type') || 0) === 4) {
-          dav.value.customUrl = localStorage.getItem('wd_url') || '';
-          const m = /^Basic\s+(.+)$/i.exec(localStorage.getItem('auth') || '');
-          if (m) {
-            const dec = atob(m[1]);
-            const i = dec.indexOf(':');
-            if (i >= 0) {
-              dav.value.username = dec.slice(0, i);
-              dav.value.password = dec.slice(i + 1);
+      if (!fromStore) {
+        try {
+          if (Number(localStorage.getItem('sync_type') || 0) === 4) {
+            dav.value.customUrl = localStorage.getItem('wd_url') || '';
+            const m = /^Basic\s+(.+)$/i.exec(localStorage.getItem('auth') || '');
+            if (m) {
+              const dec = atob(m[1]);
+              const i = dec.indexOf(':');
+              if (i >= 0) {
+                dav.value.username = dec.slice(0, i);
+                dav.value.password = dec.slice(i + 1);
+              }
             }
           }
-        }
-      } catch (e) { /* atob 失败等一律忽略 */ }
+        } catch (e) { /* atob 失败等一律忽略 */ }
+      }
+
+      // 保存后自动同步默认开启。老配置里没有这一项，靠 undefined 判断会让复选框
+      // 显示成未勾选、而行为却是开启，所以补一个明确的值。
+      if (dav.value.autoSync === undefined) dav.value.autoSync = true;
     }
     function davSave() {
       const cfg = Object.assign({}, dav.value);
@@ -937,6 +952,37 @@ createApp({
       if (!res) throw new Error('无响应');
       if (!res.ok) throw new Error(res.error || '未知错误');
       return res.data;
+    }
+
+    function davConfigured() {
+      return !!(String(dav.value.customUrl || '').trim() && String(dav.value.username || '').trim());
+    }
+
+    /* 同步串行化：要跑好几秒，编辑页按钮、设置页三个按钮、保存后自动同步
+     * 都可能在同一时刻要求同步。正在跑就记一个"排队"，跑完再补一次，
+     * 避免两个同步交叉执行、互相覆盖远端。
+     */
+    async function runSync(task) {
+      if (syncing.value) { syncQueued = true; return; }
+      syncing.value = true;
+      try {
+        await task();
+      } finally {
+        syncing.value = false;
+      }
+      if (syncQueued) {
+        syncQueued = false;
+        await runSync(task);
+      }
+    }
+
+    /* 保存成功后自动同步。没配 WebDAV 就静默跳过；设置页可以关掉。
+     * 失败不需要额外提示——syncNow 自己会把错误写进 lastError 并弹提示。
+     */
+    async function maybeAutoSync() {
+      if (dav.value.autoSync === false) return;
+      if (!davConfigured()) return;
+      await runSync(syncNow);
     }
 
     /* --- 本地 -> 远端：布尔化，并把 category 挪到 type（与原版 b() 一致，只改副本） --- */
@@ -1370,7 +1416,11 @@ createApp({
       pickImage, onFilePicked, onPaste, removeImage,
       addCategory, removeCategory, addTag, removeTag,
       exportBackup, importBackup, exportJson, importJson,
-      davTest, davSave, syncNow, syncUploadOnly, syncDownloadOnly, davBase, davPendingImages
+      davTest, davSave, davBase, davPendingImages, syncing,
+      // 界面上的三个同步入口统一走 runSync：串行、防重叠；测试走 window.__mydiary.sync 里的原始函数
+      syncNow: () => runSync(syncNow),
+      syncUploadOnly: () => runSync(syncUploadOnly),
+      syncDownloadOnly: () => runSync(syncDownloadOnly)
     };
   }
 }).mount('#app');

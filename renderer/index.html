@@ -176,6 +176,7 @@
               <input v-model="dav.password" type="password" placeholder="若云盘提供应用密码，填应用密码">
             </label>
             <label class="chk"><input type="checkbox" v-model="dav.selfSigned"> 忽略自签名证书</label>
+            <label class="chk"><input type="checkbox" v-model="dav.autoSync"> 保存后自动同步</label>
           </div>
           <p class="dim mono" v-if="davBase">远端目录：{{ davBase }}/diary/</p>
           <p class="dim" v-if="davPendingImages">待上传本地图片：{{ davPendingImages }} 张</p>
@@ -199,6 +200,7 @@
         <template v-if="editing">
           <div class="editor-head">
             <input class="title-input" v-model="editing.title" placeholder="标题">
+            <button class="btn" :disabled="syncing" @click="syncNow">{{ syncing ? '同步中…' : '同步' }}</button>
             <button class="btn" @click="togglePreview">{{ preview ? '编辑' : '预览' }}</button>
             <button class="btn primary" @click="saveDiary">保存</button>
             <button class="btn danger" @click="deleteDiary">删除</button>

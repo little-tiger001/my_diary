@@ -280,6 +280,67 @@ app.whenReady().then(async () => {
     }
   }
 
+  // ---------- 编辑页：同步按钮 + 保存后自动同步 ----------
+  // 没打开日记时编辑器位置是"选一篇日记"占位，工具条还不存在，所以先点开一篇
+  const editorUi = await js(`(async () => {
+    const card = document.querySelector('.list .card');
+    if (card) { card.click(); await new Promise((r) => setTimeout(r, 500)); }
+    const btns = [...document.querySelectorAll('.editor-head .btn')].map((b) => b.textContent.trim());
+    const chk = [...document.querySelectorAll('.form .chk')].map((l) => l.textContent.trim());
+    return {
+      btns, chk,
+      hasEditor: !!document.querySelector('.title-input'),
+      autoSync: window.__mydiary.sync.state().autoSync
+    };
+  })()`, 'editor ui');
+  check('编辑页有同步按钮', !!(editorUi && editorUi.hasEditor && editorUi.btns.includes('同步')),
+    JSON.stringify(editorUi && { hasEditor: editorUi.hasEditor, btns: editorUi.btns }));
+  check('设置页有「保存后自动同步」且默认开启',
+    !!(editorUi && editorUi.chk.some((t) => t.indexOf('保存后自动同步') >= 0) && editorUi.autoSync !== false),
+    JSON.stringify(editorUi && { chk: editorUi.chk, autoSync: editorUi.autoSync }));
+
+  const AUTO_TITLE = '__保存后自动同步测试__';
+  const autoSyncResult = await js(`(async () => {
+    const input = document.querySelector('.title-input');
+    if (!input) return { error: '编辑器没打开' };
+    // 先关掉上一条提示：toast 会挂 4 秒，不清掉的话轮询会把旧提示当成这次的
+    const old = document.querySelector('.notice .x');
+    if (old) old.click();
+    await new Promise((r) => setTimeout(r, 150));
+    input.value = ${JSON.stringify(AUTO_TITLE)};
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 100));
+    const saveBtn = [...document.querySelectorAll('.editor-head .btn')].find((b) => b.textContent.trim() === '保存');
+    if (!saveBtn) return { error: '没有保存按钮' };
+    saveBtn.click();
+    // 提示 4 秒后自己消失，所以轮询取"最后看到的那条"，而不是死等一个固定时长
+    let notice = '';
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise((r) => setTimeout(r, 200));
+      const n = document.querySelector('.notice');
+      if (n && n.textContent) notice = n.textContent;
+      if (/同步完成|无需同步|同步失败|上传失败/.test(notice)) break;
+    }
+    return { notice, error: window.__mydiary.sync.state().lastError };
+  })()`, 'auto sync after save');
+  check('保存后自动同步没报错', !!(autoSyncResult && !autoSyncResult.error), JSON.stringify(autoSyncResult));
+  check('保存后自动同步给了提示', !!(autoSyncResult && /同步完成|无需同步/.test(autoSyncResult.notice)),
+    autoSyncResult && autoSyncResult.notice);
+
+  // 远端是否真的收到了这个标题：轮询几次，别卡在一次读数上（同步是异步的）
+  const readRemoteTitles = async () => {
+    const d = await dump();
+    const f = remoteFile(d.files, '/dav/diary/diary.json');
+    try { return f ? JSON.parse(JSON.parse(f.body).json) : []; } catch (e) { return []; }
+  };
+  let listSaved = await readRemoteTitles();
+  for (let i = 0; i < 10 && !listSaved.some((x) => x.title === AUTO_TITLE); i += 1) {
+    await sleep(500);
+    listSaved = await readRemoteTitles();
+  }
+  check('保存后标题已自动推到远端', listSaved.some((x) => x.title === AUTO_TITLE),
+    listSaved.some((x) => x.title === AUTO_TITLE) ? '远端已命中' : '远端没有这个标题');
+
   // ---------- 反向合并 ----------
   const NEW_UUID = 'davtest-1111-2222-3333-444444444444';
   if (obj) {

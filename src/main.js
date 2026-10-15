@@ -77,6 +77,21 @@ function writeSnapshot(text) {
 
 let mainWindow = null;
 
+/* 窗口与任务栏图标。打包配置里 signAndEditExecutable=false（不签也不改 exe），
+ * 所以 exe 自身带的仍是 Electron 图标，标题栏/任务栏只能靠这里指定，按顺序找：
+ *   1) 安装目录的 resources/icon.ico（electron-builder 的 extraResources 放的那份）
+ *   2) exe 同级的 icon.ico（tools/install.ps1 会复制一份）
+ *   3) 仓库里的 build/icon.ico（开发时跑 electron . 用）
+ */
+function resolveIcon() {
+  const candidates = [
+    process.resourcesPath ? path.join(process.resourcesPath, 'icon.ico') : '',
+    path.join(path.dirname(process.execPath), 'icon.ico'),
+    path.join(__dirname, '..', 'build', 'icon.ico')
+  ].filter(Boolean);
+  return candidates.find((p) => fs.existsSync(p));
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -84,6 +99,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: '我的日记',
+    icon: resolveIcon(),
     backgroundColor: '#f5f5f5',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

@@ -1,6 +1,6 @@
 {
   "name": "my-diary",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "我的日记 - 本地日记本",
   "productName": "我的日记",
   "author": "local",
@@ -36,6 +36,12 @@
       "vendor/**/*",
       "package.json",
       "!node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      }
     ],
     "win": {
       "signAndEditExecutable": false,
